@@ -1,0 +1,376 @@
+---
+- name: Apply PyAudit CCDC/CyberForce Linux hardening baseline
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    ssh_port: 22
+
+  collections:
+    - community.general
+    - ansible.posix
+
+  pre_tasks:
+    - name: Detect supported Linux family and platform settings
+      ansible.builtin.set_fact:
+        hardening_packages: >-
+          {{ {
+            'Debian': ['apparmor', 'apparmor-utils', 'auditd', 'audispd-plugins', 'aide', 'fail2ban', 'libpam-pwquality', 'unattended-upgrades', 'ufw', 'usbguard'],
+            'RedHat': ['audit', 'audispd-plugins', 'aide', 'fail2ban', 'libpwquality', 'firewalld', 'dnf-automatic', 'usbguard', 'policycoreutils', 'selinux-policy-targeted'],
+            'Suse': ['audit', 'aide', 'fail2ban', 'pam_pwquality', 'firewalld', 'usbguard'],
+            'Archlinux': ['apparmor', 'audit', 'aide', 'fail2ban', 'libpwquality', 'firewalld', 'usbguard']
+          }.get(ansible_facts.os_family, []) }}
+        ssh_service: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+        firewall_backend: "{{ 'ufw' if ansible_facts.os_family == 'Debian' else 'firewalld' }}"
+        security_services: >-
+          {{ (['apparmor', 'auditd', 'fail2ban', 'rsyslog'] if ansible_facts.os_family == 'Debian'
+              else ['auditd', 'fail2ban', 'firewalld', 'rsyslog']) }}
+
+    - name: Require a supported Linux family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in ['Debian', 'RedHat', 'Suse', 'Archlinux']
+        fail_msg: "Unsupported Linux family: {{ ansible_facts.os_family }}. Supported families are Debian, RedHat, Suse, and Archlinux."
+
+    - name: Display detected platform
+      ansible.builtin.debug:
+        msg: "Detected {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} ({{ ansible_facts.os_family }}); using {{ firewall_backend }} and {{ ansible_facts.pkg_mgr }}."
+
+  tasks:
+    - name: Install Debian-family hardening packages
+      ansible.builtin.apt:
+        name: "{{ hardening_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Install RPM/SUSE/Arch hardening packages
+      ansible.builtin.package:
+        name: "{{ hardening_packages }}"
+        state: present
+      when: ansible_facts.os_family != 'Debian'
+
+    - name: Remove legacy remote-access packages
+      ansible.builtin.apt:
+        name:
+          - telnet
+          - telnetd
+          - rsh-client
+          - rsh-redone
+          - talk
+          - talkd
+        state: absent
+        purge: true
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Remove legacy remote-access packages on RPM and other systems
+      ansible.builtin.package:
+        name:
+          - telnet
+          - telnet-server
+          - rsh
+          - rsh-server
+          - talk
+          - talk-server
+        state: absent
+      when: ansible_facts.os_family != 'Debian'
+
+    - name: Enable and start security services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: "{{ security_services }}"
+      failed_when: false
+
+    - name: Set UFW default policies on Debian-family systems
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+        logging: "{{ item.logging | default(omit) }}"
+      loop:
+        - { direction: incoming, policy: deny, logging: medium }
+        - { direction: outgoing, policy: allow }
+      when: firewall_backend == 'ufw'
+
+    - name: Allow SSH before enabling UFW
+      community.general.ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+        comment: SSH administrative access
+      when: firewall_backend == 'ufw'
+
+    - name: Enable UFW on Debian-family systems
+      community.general.ufw:
+        state: enabled
+      when: firewall_backend == 'ufw'
+
+    - name: Configure firewalld default zone on RPM/SUSE/Arch systems
+      ansible.posix.firewalld:
+        zone: public
+        state: enabled
+        permanent: true
+        immediate: true
+      when: firewall_backend == 'firewalld'
+
+    - name: Allow SSH through firewalld
+      ansible.posix.firewalld:
+        zone: public
+        port: "{{ ssh_port }}/tcp"
+        state: enabled
+        permanent: true
+        immediate: true
+      when: firewall_backend == 'firewalld'
+
+    - name: Configure SSH hardening drop-in
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure SSH hardening drop-in file
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-pyaudit-hardening.conf
+        owner: root
+        group: root
+        mode: '0600'
+        validate: '/usr/sbin/sshd -t -f %s'
+        content: |
+          # Managed by PyAudit. Keep PasswordAuthentication enabled for competition recovery.
+          PermitRootLogin no
+          PermitEmptyPasswords no
+          MaxAuthTries 4
+          LoginGraceTime 30
+          X11Forwarding no
+          AllowTcpForwarding no
+          AllowAgentForwarding no
+          PermitTunnel no
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+          LogLevel VERBOSE
+      notify: Restart SSH
+
+    - name: Configure password quality policy
+      ansible.builtin.file:
+        path: /etc/security/pwquality.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure password quality policy file
+      ansible.builtin.copy:
+        dest: /etc/security/pwquality.conf.d/99-pyaudit.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          minlen = 14
+          minclass = 3
+          maxrepeat = 3
+          dictcheck = 1
+
+    - name: Configure password aging defaults
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} {{ item.value }}"
+      loop:
+        - { key: PASS_MAX_DAYS, value: 90 }
+        - { key: PASS_MIN_DAYS, value: 1 }
+        - { key: PASS_WARN_AGE, value: 14 }
+
+    - name: Configure safer sudo defaults
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/99-pyaudit-hardening
+        owner: root
+        group: root
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+        content: |
+          Defaults use_pty
+          Defaults logfile="/var/log/sudo.log"
+          Defaults timestamp_timeout=5
+          Defaults passwd_tries=3
+          Defaults !visiblepw
+
+    - name: Configure kernel and network protections
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-pyaudit-hardening.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Network attack-surface reduction
+          net.ipv4.ip_forward = 0
+          net.ipv6.conf.all.forwarding = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.secure_redirects = 0
+          net.ipv4.conf.default.secure_redirects = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv4.conf.all.rp_filter = 1
+          net.ipv4.conf.default.rp_filter = 1
+          net.ipv4.icmp_echo_ignore_broadcasts = 1
+          net.ipv4.icmp_ignore_bogus_error_responses = 1
+          net.ipv4.tcp_syncookies = 1
+          net.ipv6.conf.all.accept_ra = 0
+          net.ipv6.conf.default.accept_ra = 0
+          # Information-leak and crash protections
+          kernel.dmesg_restrict = 1
+          kernel.kptr_restrict = 2
+          kernel.yama.ptrace_scope = 1
+          fs.suid_dumpable = 0
+          kernel.randomize_va_space = 2
+      notify: Reload sysctl
+
+    - name: Disable core dumps for users
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/99-pyaudit-coredumps.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          * hard core 0
+          * soft core 0
+
+    - name: Set a restrictive default umask for login shells
+      ansible.builtin.copy:
+        dest: /etc/profile.d/99-pyaudit-umask.sh
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # PyAudit baseline: new files are not world-readable by default.
+          umask 027
+
+    - name: Configure audit rules for identity and privilege changes
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/99-pyaudit.rules
+        owner: root
+        group: root
+        mode: '0640'
+        content: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /etc/sudoers -p wa -k scope
+          -w /etc/sudoers.d/ -p wa -k scope
+          -w /var/log/auth.log -p wa -k authlog
+          -w /var/log/faillog -p wa -k logins
+          -w /var/log/lastlog -p wa -k logins
+          -a always,exit -F arch=b64 -S execve -F euid=0 -k privileged
+          -a always,exit -F arch=b32 -S execve -F euid=0 -k privileged
+          -a always,exit -F arch=b64 -S mount -S umount2 -k mounts
+          -a always,exit -F arch=b32 -S mount -S umount -k mounts
+          -e 2
+      notify: Restart auditd
+
+    - name: Restrict critical configuration file permissions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/passwd, owner: root, group: root, mode: '0644' }
+        - { path: /etc/group, owner: root, group: root, mode: '0644' }
+        - { path: /etc/shadow, owner: root, group: shadow, mode: '0640' }
+        - { path: /etc/gshadow, owner: root, group: shadow, mode: '0640' }
+        - { path: /etc/ssh/sshd_config, owner: root, group: root, mode: '0600' }
+
+    - name: Lock the emergency Ctrl-Alt-Delete target
+      ansible.builtin.systemd:
+        name: ctrl-alt-del.target
+        masked: true
+        daemon_reload: true
+
+    - name: Harden Debian unattended-upgrades configuration
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Enable automatic updates on RPM systems
+      ansible.builtin.service:
+        name: dnf-automatic.timer
+        state: started
+        enabled: true
+      when: ansible_facts.os_family == 'RedHat'
+      failed_when: false
+
+    - name: Enable automatic updates on SUSE systems
+      ansible.builtin.service:
+        name: packagekit-background.timer
+        state: started
+        enabled: true
+      when: ansible_facts.os_family == 'Suse'
+      failed_when: false
+
+    - name: Ensure cron directories are not writable by non-root users
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - /etc/cron.d
+        - /etc/cron.daily
+        - /etc/cron.hourly
+        - /etc/cron.weekly
+        - /etc/cron.monthly
+
+    - name: Deploy a conservative fail2ban SSH jail
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/sshd.local
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [sshd]
+          enabled = true
+          port = {{ ssh_port }}
+          maxretry = 5
+          findtime = 10m
+          bantime = 1h
+      notify: Restart fail2ban
+
+    - name: Report AIDE initialization requirement
+      ansible.builtin.debug:
+        msg: "AIDE is installed. Initialize its baseline after reviewing this host with: sudo aideinit"
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: "{{ ssh_service }}"
+        state: restarted
+
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Restart auditd
+      ansible.builtin.service:
+        name: auditd
+        state: restarted
+      failed_when: false
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
