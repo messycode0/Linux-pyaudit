@@ -43,10 +43,11 @@ if __name__ == "__main__":
  \______/ |__/     \__/|______/|__/         |__/                                                                                    
                                                                                                                                     
                                                                                                                                                                                                                                                                              
-Originally For CyberPatiot, apt (Debain/Ubuntu) Linux images, Now includes RedHat/CentOS/Fedora, and Arch Linux. 
+Originally For CyberPatiot, apt (Debain/Ubuntu) Linux images, Now includes RedHat/CentOS/Fedora, and Arch Linux (Unverified). 
 Updated for collegiate for CCDC and DoE CyberForce!
-version: {version}                                                                                                                             
-Made by DogBytes 2024 Revised by CalPoly: LeBroncoBytes 2026                                                                                                                                     
+version: {version}          
+Written by Jacob D. O'Brien                                                                                                                   
+Made by DogBytes 2024, Revised by CalPoly: LeBroncoBytes 2026                                                                                                                                     
 """
     )
 

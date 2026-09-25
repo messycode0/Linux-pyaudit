@@ -1,5 +1,5 @@
 """Run the bundled Ansible hardening playbook."""
-
+# Lowk ngl, ansible was a pain to use lmao, but fun noneless
 from pathlib import Path
 import shutil
 import subprocess
