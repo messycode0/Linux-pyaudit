@@ -44,7 +44,7 @@ if __name__ == "__main__":
                                                                                                                                     
                                                                                                                                                                                                                                                                              
 Originally For CyberPatiot, apt (Debain/Ubuntu) Linux images, Now includes RedHat/CentOS/Fedora, and Arch Linux (Unverified). 
-Updated for collegiate for CCDC and DoE CyberForce!
+Updated for collegiate cyber: CCDC and DoE CyberForce!
 version: {version}          
 Written by Jacob D. O'Brien                                                                                                                   
 Made by DogBytes 2024, Revised by CalPoly: LeBroncoBytes 2026                                                                                                                                     
